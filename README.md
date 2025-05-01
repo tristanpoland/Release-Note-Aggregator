@@ -23,8 +23,8 @@ A command-line tool that aggregates release notes from GitHub repositories betwe
 
 1. Clone this repository
    ```
-   git clone https://github.com/yourusername/github-release-notes-aggregator.git
-   cd github-release-notes-aggregator
+   git clone https://github.com/tristanpoland/Release-Note-Agregator
+   cd Release-Note-Agregator
    ```
 
 2. Build with Cargo
@@ -32,12 +32,12 @@ A command-line tool that aggregates release notes from GitHub repositories betwe
    cargo build --release
    ```
 
-3. The compiled binary will be available at `target/release/github-release-notes-aggregator`
+3. The compiled binary will be available at `target/release/ghnotes`
 
 ## Usage
 
 ```
-github-release-notes-aggregator --owner OWNER --repo REPO [OPTIONS]
+ghnotes --owner OWNER --repo REPO [OPTIONS]
 ```
 
 ### Required Arguments
@@ -59,37 +59,37 @@ github-release-notes-aggregator --owner OWNER --repo REPO [OPTIONS]
 
 Aggregate all release notes for a repository:
 ```
-github-release-notes-aggregator --owner microsoft --repo vscode
+ghnotes --owner microsoft --repo vscode
 ```
 
 Aggregate release notes between specific versions:
 ```
-github-release-notes-aggregator --owner microsoft --repo vscode --start-tag 1.60.0 --end-tag 1.70.0
+ghnotes --owner microsoft --repo vscode --start-tag 1.60.0 --end-tag 1.70.0
 ```
 
 Aggregate release notes for specific, arbitrary versions:
 ```
-github-release-notes-aggregator --owner microsoft --repo vscode --versions "1.60.0,1.65.0,1.70.0"
+ghnotes --owner microsoft --repo vscode --versions "1.60.0,1.65.0,1.70.0"
 ```
 
 Merge content by common headings instead of grouping by version:
 ```
-github-release-notes-aggregator --owner microsoft --repo vscode --merge-headings
+ghnotes --owner microsoft --repo vscode --merge-headings
 ```
 
 Combine arbitrary versions and merge by headings:
 ```
-github-release-notes-aggregator --owner microsoft --repo vscode --versions "1.60.0,1.65.0,1.70.0" --merge-headings
+ghnotes --owner microsoft --repo vscode --versions "1.60.0,1.65.0,1.70.0" --merge-headings
 ```
 
 Save to a specific file:
 ```
-github-release-notes-aggregator --owner microsoft --repo vscode --output vscode-releases.md
+ghnotes --owner microsoft --repo vscode --output vscode-releases.md
 ```
 
 Include pre-releases and use a GitHub token:
 ```
-github-release-notes-aggregator --owner microsoft --repo vscode --include-prereleases --token ghp_your_token_here
+ghnotes --owner microsoft --repo vscode --include-prereleases --token ghp_your_token_here
 ```
 
 ## Output Format
