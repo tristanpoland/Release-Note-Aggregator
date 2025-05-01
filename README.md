@@ -23,7 +23,7 @@ A command-line tool that aggregates release notes from GitHub repositories betwe
 
 1. Clone this repository
    ```
-   git clone https://github.com/tristanpoland/Release-Note-Agregator
+   git clone https://github.com/tristanpoland/Release-Note-Aggregator
    cd Release-Note-Agregator
    ```
 
