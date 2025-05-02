@@ -8,6 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+// Added for logging
+use log::{debug, info, warn, error};
+use env_logger;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -38,7 +41,7 @@ struct Cli {
     token: Option<String>,
 
     /// Output markdown file path
-    #[arg(short, long, default_value = "aggregated_release_notes.md")]
+    #[arg(long, default_value = "aggregated_release_notes.md")]
     output: PathBuf,
 
     /// Include pre-releases
@@ -52,6 +55,10 @@ struct Cli {
     /// Merge by heading (combine content under common headings instead of keeping versions separate)
     #[arg(short = 'm', long, default_value = "false")]
     merge_headings: bool,
+    
+    /// Enable verbose logging
+    #[arg(long, default_value = "false")]
+    verbose: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -74,14 +81,22 @@ struct ReleaseNoteItem {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    println!("Fetching release notes for {}/{}", cli.owner, cli.repo);
+    
+    // Initialize logger
+    if cli.verbose {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    } else {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    }
+    
+    info!("Fetching release notes for {}/{}", cli.owner, cli.repo);
 
     // Get all releases first
     let all_releases = fetch_all_releases(&cli).await?;
-    println!("Found {} releases total", all_releases.len());
+    info!("Found {} releases total", all_releases.len());
 
     if all_releases.is_empty() {
-        println!("No releases found. Exiting.");
+        warn!("No releases found. Exiting.");
         return Ok(());
     }
 
@@ -89,34 +104,40 @@ async fn main() -> Result<()> {
     let releases_to_process = if let Some(versions) = &cli.versions {
         // Process arbitrary versions
         let version_tags: Vec<&str> = versions.split(',').map(|s| s.trim()).collect();
+        debug!("Processing specific versions: {:?}", version_tags);
         filter_releases_by_tags(&all_releases, &version_tags)?
     } else if cli.start_tag.is_some() || cli.end_tag.is_some() {
         // Process range of versions
+        debug!("Processing range: start={:?}, end={:?}", cli.start_tag, cli.end_tag);
         filter_releases_by_range(&all_releases, cli.start_tag.as_deref(), cli.end_tag.as_deref())?
     } else {
         // Process all releases
+        debug!("Processing all releases");
         all_releases
     };
 
-    println!("Processing {} releases", releases_to_process.len());
+    info!("Processing {} releases", releases_to_process.len());
 
     let markdown = if cli.merge_headings {
         // Merge content under common headings
+        debug!("Merging release notes by heading");
         let merged_by_heading = merge_release_notes_by_heading(&releases_to_process);
         generate_markdown_merged_headings(&merged_by_heading)
     } else {
         // Traditional merge - keep versions separate under each heading
+        debug!("Merging release notes by version");
         let merged_sections = merge_release_notes(&releases_to_process);
         generate_markdown(&merged_sections)
     };
 
     // Write to file
+    debug!("Writing output to {:?}", cli.output);
     let mut file = File::create(&cli.output)
         .with_context(|| format!("Failed to create output file: {:?}", cli.output))?;
     file.write_all(markdown.as_bytes())
         .with_context(|| format!("Failed to write to output file: {:?}", cli.output))?;
 
-    println!("Successfully wrote aggregated release notes to {:?}", cli.output);
+    info!("Successfully wrote aggregated release notes to {:?}", cli.output);
     Ok(())
 }
 
@@ -126,43 +147,80 @@ async fn fetch_all_releases(cli: &Cli) -> Result<Vec<Release>> {
     headers.insert(USER_AGENT, HeaderValue::from_static("github-release-notes-aggregator"));
     
     if let Some(token) = &cli.token {
+        debug!("Using GitHub personal access token for authentication");
         headers.insert(
             reqwest::header::AUTHORIZATION,
             HeaderValue::from_str(&format!("token {}", token))?,
         );
+    } else {
+        debug!("No GitHub token provided, using unauthenticated requests");
     }
 
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases?per_page=100",
         cli.owner, cli.repo
     );
-
+    
+    info!("Making API request to: {}", url);
+    
+    // Log request details before sending
+    debug!("API Request: GET {}", url);
+    debug!("Headers: {:?}", headers);
+    
     let response = client
         .get(&url)
         .headers(headers)
         .send()
         .await
         .context("Failed to send request to GitHub API")?;
-
+    
+    // Log response details
+    debug!("API Response: Status: {}", response.status());
+    debug!("Response headers: {:?}", response.headers());
+    
     if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|_| "Unable to read response body".to_string());
+        error!("GitHub API error: Status={}, Body={}", status, body);
         return Err(anyhow::anyhow!(
-            "GitHub API returned error status: {}",
-            response.status()
+            "GitHub API returned error status: {}, Body: {}",
+            status, body
         ));
     }
-
-    let mut releases: Vec<Release> = response
-        .json()
-        .await
+    
+    // Clone the response for logging the body if needed
+    let response_text = response.text().await.context("Failed to get response text")?;
+    debug!("Response body length: {} bytes", response_text.len());
+    
+    if cli.verbose {
+        debug!("First 500 characters of response: {}", 
+            if response_text.len() > 500 {
+                &response_text[..500]
+            } else {
+                &response_text
+            }
+        );
+    }
+    
+    // Parse the JSON response
+    let releases: Vec<Release> = serde_json::from_str(&response_text)
         .context("Failed to parse GitHub API response")?;
+    
+    debug!("Parsed {} releases from API response", releases.len());
 
     // Filter out prereleases if not included
-    if !cli.include_prereleases {
-        releases.retain(|r| !r.prerelease);
-    }
+    let filtered_releases = if !cli.include_prereleases {
+        let prerelease_count = releases.iter().filter(|r| r.prerelease).count();
+        let filtered = releases.into_iter().filter(|r| !r.prerelease).collect::<Vec<_>>();
+        debug!("Filtered out {} prereleases", prerelease_count);
+        filtered
+    } else {
+        releases
+    };
 
     // Sort by published date (newest first)
-    releases.sort_by(|a, b| {
+    let mut sorted_releases = filtered_releases;
+    sorted_releases.sort_by(|a, b| {
         let date_a = chrono::DateTime::parse_from_rfc3339(&a.published_at)
             .unwrap()
             .naive_utc();
@@ -171,8 +229,10 @@ async fn fetch_all_releases(cli: &Cli) -> Result<Vec<Release>> {
             .naive_utc();
         date_b.cmp(&date_a)
     });
+    
+    debug!("Releases sorted by date (newest first)");
 
-    Ok(releases)
+    Ok(sorted_releases)
 }
 
 fn filter_releases_by_range(
@@ -183,6 +243,7 @@ fn filter_releases_by_range(
     let mut filtered = releases.to_vec();
     
     if let (Some(start_tag), Some(end_tag)) = (start_tag, end_tag) {
+        debug!("Filtering releases between tags '{}' and '{}'", start_tag, end_tag);
         let start_index = releases
             .iter()
             .position(|r| r.tag_name == start_tag)
@@ -199,6 +260,8 @@ fn filter_releases_by_range(
         } else {
             (end_index, start_index)
         };
+        
+        debug!("Tag indices: start={}, end={}", lower_index, higher_index);
 
         filtered = releases.iter().enumerate()
             .filter(|(i, _)| *i >= lower_index && *i <= higher_index)
@@ -206,6 +269,7 @@ fn filter_releases_by_range(
             .collect();
     } else if let Some(start_tag) = start_tag {
         // Only start tag specified - get from that tag to the latest
+        debug!("Filtering releases from tag '{}' to latest", start_tag);
         let start_index = releases
             .iter()
             .position(|r| r.tag_name == start_tag)
@@ -217,6 +281,7 @@ fn filter_releases_by_range(
             .collect();
     } else if let Some(end_tag) = end_tag {
         // Only end tag specified - get from the earliest to that tag
+        debug!("Filtering releases from earliest to tag '{}'", end_tag);
         let end_index = releases
             .iter()
             .position(|r| r.tag_name == end_tag)
@@ -228,10 +293,12 @@ fn filter_releases_by_range(
             .collect();
     }
     
+    info!("Filtered to {} releases", filtered.len());
     Ok(filtered)
 }
 
 fn filter_releases_by_tags(releases: &[Release], tags: &[&str]) -> Result<Vec<Release>> {
+    debug!("Filtering releases by specific tags: {:?}", tags);
     let mut filtered_releases = Vec::new();
     let mut missing_tags = Vec::new();
     
@@ -245,6 +312,7 @@ fn filter_releases_by_tags(releases: &[Release], tags: &[&str]) -> Result<Vec<Re
     }
     
     if !missing_tags.is_empty() {
+        error!("Missing tags: {:?}", missing_tags);
         return Err(anyhow::anyhow!(
             "Could not find the following tags: {}",
             missing_tags.join(", ")
@@ -261,7 +329,8 @@ fn filter_releases_by_tags(releases: &[Release], tags: &[&str]) -> Result<Vec<Re
             .naive_utc();
         date_b.cmp(&date_a)
     });
-
+    
+    info!("Filtered to {} releases", filtered_releases.len());
     Ok(filtered_releases)
 }
 
@@ -290,6 +359,7 @@ fn parse_release_notes(body: &str) -> HashMap<String, Vec<String>> {
     // Remove sections with no content
     sections.retain(|_, lines| !lines.is_empty());
     
+    debug!("Parsed {} sections from release notes", sections.len());
     sections
 }
 
@@ -307,6 +377,8 @@ fn merge_release_notes(releases: &[Release]) -> HashMap<String, Vec<ReleaseNoteI
         }
     }
     
+    debug!("Found {} unique section names across all releases", known_sections.len());
+    
     // Initialize merged sections
     for section in known_sections {
         merged_sections.insert(section, Vec::new());
@@ -321,6 +393,7 @@ fn merge_release_notes(releases: &[Release]) -> HashMap<String, Vec<ReleaseNoteI
                 .naive_utc()
                 .date();
             
+            debug!("Processing release {} ({})", version, date);
             let sections = parse_release_notes(body);
             
             for (section_name, items) in sections {
@@ -334,9 +407,12 @@ fn merge_release_notes(releases: &[Release]) -> HashMap<String, Vec<ReleaseNoteI
                     merged_sections.get_mut(&section_name).unwrap().push(note_item);
                 }
             }
+        } else {
+            debug!("Release {} has no body content", release.tag_name);
         }
     }
     
+    debug!("Merged all release notes into sections");
     merged_sections
 }
 
@@ -361,6 +437,8 @@ fn merge_release_notes_by_heading(releases: &[Release]) -> HashMap<String, Vec<M
         }
     }
     
+    debug!("Found {} unique section names across all releases", known_sections.len());
+    
     // Initialize merged sections
     for section in known_sections {
         merged_sections.insert(section, Vec::new());
@@ -372,6 +450,7 @@ fn merge_release_notes_by_heading(releases: &[Release]) -> HashMap<String, Vec<M
     for release in releases {
         if let Some(body) = &release.body {
             let version = release.tag_name.clone();
+            debug!("Processing release {} for heading merge", version);
             let sections = parse_release_notes(body);
             
             for (section_name, items) in sections {
@@ -424,12 +503,14 @@ fn merge_release_notes_by_heading(releases: &[Release]) -> HashMap<String, Vec<M
         merged_sections.insert(section_name, merged_items);
     }
     
+    debug!("Merged release notes by heading");
     merged_sections
 }
 
 fn generate_markdown(
     merged_sections: &HashMap<String, Vec<ReleaseNoteItem>>,
 ) -> String {
+    debug!("Generating markdown output (version-based)");
     let mut markdown = String::from("# Aggregated Release Notes\n\n");
     
     // Sort sections alphabetically, but put "Uncategorized" at the end
@@ -445,6 +526,7 @@ fn generate_markdown(
     });
     
     for section_name in section_names {
+        debug!("Processing section: {}", section_name);
         markdown.push_str(&format!("## {}\n\n", section_name));
         
         let items = &merged_sections[section_name];
@@ -463,6 +545,7 @@ fn generate_markdown(
         version_entries.sort_by(|a, b| b.0.1.cmp(&a.0.1));
         
         for ((version, date), version_items) in version_entries {
+            debug!("Adding version: {} ({})", version, date);
             markdown.push_str(&format!(
                 "### {} ({})\n\n",
                 version,
@@ -477,6 +560,7 @@ fn generate_markdown(
         }
     }
     
+    info!("Generated markdown output: {} bytes", markdown.len());
     markdown
 }
 
@@ -484,6 +568,7 @@ fn generate_markdown(
 fn generate_markdown_merged_headings(
     merged_sections: &HashMap<String, Vec<MergedHeadingItem>>,
 ) -> String {
+    debug!("Generating markdown output (heading-based)");
     let mut markdown = String::from("# Aggregated Release Notes (Merged by Heading)\n\n");
     
     // Sort sections alphabetically, but put "Uncategorized" at the end
@@ -499,6 +584,7 @@ fn generate_markdown_merged_headings(
     });
     
     for section_name in section_names {
+        debug!("Processing section: {}", section_name);
         markdown.push_str(&format!("## {}\n\n", section_name));
         
         let items = &merged_sections[section_name];
@@ -516,8 +602,10 @@ fn generate_markdown_merged_headings(
                 };
                 
                 let sources_list = sorted_sources.join(", ");
+                debug!("Item appears in multiple versions: {}", sources_list);
                 markdown.push_str(&format!("*(Present in versions: {})*\n\n", sources_list));
             } else if !item.sources.is_empty() {
+                debug!("Item appears in single version: {}", item.sources[0]);
                 markdown.push_str(&format!("*(From version: {})*\n\n", item.sources[0]));
             } else {
                 markdown.push_str("\n");
@@ -527,5 +615,6 @@ fn generate_markdown_merged_headings(
         markdown.push_str("\n");
     }
     
+    info!("Generated markdown output: {} bytes", markdown.len());
     markdown
 }
