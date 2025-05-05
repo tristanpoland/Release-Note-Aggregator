@@ -30,3 +30,4 @@ Cargo.lock
 
 # Windows files
 Thumbs.db
+*.zip
